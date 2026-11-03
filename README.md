@@ -15,8 +15,8 @@ Development of this program will follow the V-Model of the Software Development 
 | Phase | Date | Milestone |
 |---|---|---|
 | **Systems Design** | November 6 | Completion of system design and specifications |
-| **Development** | November 13 | Completion of backend and unit testing |
-| | November 20 | Completion of frontend and unit testing |
+| **Development** | November 22 | Completion of backend and unit testing |
+| | November 25 | Completion of frontend and unit testing |
 | **Integration and Testing** | November 27 | Completion of integration testing and system validation |
 | **Submission** | November 27 | **Deadline for submission** |
 
@@ -39,7 +39,7 @@ Development of this program will follow the V-Model of the Software Development 
 | フェーズ | 日付 | マイルストーン |
 |---|---|---|
 | **システム設計** | 11月6日 | システム設計及び仕様の完成 |
-| **開発** | 11月13日 | バックエンド及び単体テストの完了 |
-| | 11月20日 | フロントエンド及び単体テストの完了 |
+| **開発** | 11月22日 | バックエンド及び単体テストの完了 |
+| | 11月25日 | フロントエンド及び単体テストの完了 |
 | **結合・テスト** | 11月27日 | 結合テスト及びシステム検証の完了 |
 | **提出** | 11月27日 | **提出締め切り** |
