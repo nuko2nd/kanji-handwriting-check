@@ -1,6 +1,8 @@
 package kanji.handwriting.check;
 
 import java.util.Optional;
+import kanji.handwriting.check.model.Bounds;
+import kanji.handwriting.check.model.ReferenceComponent;
 import kanji.handwriting.check.model.ReferenceKanji;
 import kanji.handwriting.check.model.ReferenceStroke;
 import kanji.handwriting.check.service.ReferenceRepository;
@@ -45,6 +47,24 @@ public class App {
             System.out.printf("  %2d  %-6s (%6.2f, %6.2f) -> (%6.2f, %6.2f)%n",
                     s.index() + 1, s.kvgType() == null ? "-" : s.kvgType(),
                     first.x(), first.y(), last.x(), last.y());
+        }
+        System.out.println("  components:");
+        for (ReferenceComponent c : ref.components()) {
+            print(c, "    ");
+        }
+    }
+
+    private static void print(ReferenceComponent c, String indent) {
+        StringBuilder line = new StringBuilder(indent).append(c.element() == null ? "(unnamed)" : c.element());
+        if (c.position() != null) line.append("  position=").append(c.position());
+        if (c.radical() != null) line.append("  radical=").append(c.radical());
+        if (c.part() != null) line.append("  part=").append(c.part());
+        line.append("  strokes=").append(c.strokes().stream().map(s -> s.index() + 1).toList());
+        Bounds b = c.bounds();
+        line.append(String.format("  box=(%.0f,%.0f)-(%.0f,%.0f)", b.minX(), b.minY(), b.maxX(), b.maxY()));
+        System.out.println(line);
+        for (ReferenceComponent child : c.children()) {
+            print(child, indent + "  ");
         }
     }
 }
