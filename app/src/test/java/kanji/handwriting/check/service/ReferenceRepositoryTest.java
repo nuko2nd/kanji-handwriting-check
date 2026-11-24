@@ -3,6 +3,7 @@ package kanji.handwriting.check.service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -20,7 +21,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import kanji.handwriting.check.model.Bounds;
 import kanji.handwriting.check.model.Point;
+import kanji.handwriting.check.model.ReferenceComponent;
 import kanji.handwriting.check.model.ReferenceKanji;
 import kanji.handwriting.check.model.ReferenceStroke;
 
@@ -169,6 +172,178 @@ class ReferenceRepositoryTest {
         }
     }
 
+    @Nested
+    class Components {
+        private final ReferenceRepository repo = new ReferenceRepository();
+
+        private ReferenceComponent component(String kanji, int... path) {
+            List<ReferenceComponent> level = repo.get(kanji).orElseThrow().components();
+            ReferenceComponent c = null;
+            for (int i : path) {
+                c = level.get(i);
+                level = c.children();
+            }
+            return c;
+        }
+
+        private static List<Integer> strokeNumbers(ReferenceComponent c) {
+            return c.strokes().stream().map(s -> s.index() + 1).toList();
+        }
+
+        @Test
+        void kanIsWaterRadicalBesideRightPart() {
+            List<ReferenceComponent> top = repo.get("漢").orElseThrow().components();
+            assertEquals(2, top.size());
+
+            ReferenceComponent water = top.get(0);
+            assertEquals("氵", water.element());
+            assertEquals("水", water.original());
+            assertTrue(water.variant());
+            assertEquals("left", water.position());
+            assertEquals("general", water.radical());
+            assertEquals(List.of(1, 2, 3), strokeNumbers(water));
+            assertTrue(water.children().isEmpty());
+
+            ReferenceComponent right = top.get(1);
+            assertNull(right.element());
+            assertEquals("right", right.position());
+            assertEquals(List.of(4, 5, 6, 7, 8, 9, 10, 11, 12, 13), strokeNumbers(right));
+            assertTrue(water.bounds().maxX() < right.bounds().minX(), "氵 should be left of the right part");
+        }
+
+        @Test
+        void nestedComponents() {
+            // 漢 → right part → bottom part → 夫 → [unnamed ㇐, 大]
+            ReferenceComponent grass = component("漢", 1, 0);
+            assertEquals("艹", grass.element());
+            assertEquals("top", grass.position());
+
+            ReferenceComponent fu = component("漢", 1, 1, 1);
+            assertEquals("夫", fu.element());
+            assertEquals(2, fu.children().size());
+            assertNull(fu.children().get(0).element());
+            assertEquals(List.of(10), strokeNumbers(fu.children().get(0)));
+            assertEquals("大", fu.children().get(1).element());
+        }
+
+        @Test
+        void enclosingSplitComponentIsMerged() {
+            // 囗 encloses 或: KanjiVG stores it as part 1 (strokes 1-2) and part 2 (stroke 11)
+            ReferenceComponent enclosure = component("國", 0);
+            assertEquals("囗", enclosure.element());
+            assertEquals("kamae", enclosure.position());
+            assertNull(enclosure.part());
+            assertEquals(List.of(1, 2, 11), strokeNumbers(enclosure));
+            assertEquals(2, repo.get("國").orElseThrow().components().size());
+        }
+
+        @Test
+        void touchingPiecesCountAsEnclosing() {
+            // 匚's top stroke touches its ㇗ stroke, so the two pieces are one enclosure around 斤
+            List<ReferenceComponent> top = repo.get("匠").orElseThrow().components();
+            assertEquals(2, top.size());
+            assertEquals("匚", top.get(0).element());
+            assertNull(top.get(0).part());
+            assertEquals(List.of(1, 6), strokeNumbers(top.get(0)));
+        }
+
+        @Test
+        void sideBySideSplitComponentStaysSplit() {
+            // 行 around 圭 in 街: left piece 彳, right piece 亍, each its own component
+            List<ReferenceComponent> top = repo.get("街").orElseThrow().components();
+            assertEquals(List.of("行", "圭", "行"), top.stream().map(ReferenceComponent::element).toList());
+
+            ReferenceComponent left = top.get(0), right = top.get(2);
+            assertEquals(Integer.valueOf(1), left.part());
+            assertEquals("left", left.position());
+            assertEquals(List.of(1, 2, 3), strokeNumbers(left));
+            assertEquals("彳", left.children().get(0).element());
+
+            assertEquals(Integer.valueOf(2), right.part());
+            assertEquals("right", right.position());
+            assertEquals(List.of(10, 11, 12), strokeNumbers(right));
+        }
+
+        @Test
+        void stackedSplitComponentStaysSplit() {
+            // 二 in 五: top line and bottom line with the middle strokes between
+            List<ReferenceComponent> top = repo.get("五").orElseThrow().components();
+            assertEquals(3, top.size());
+            assertEquals("top", top.get(0).position());
+            assertEquals(List.of(1), strokeNumbers(top.get(0)));
+            assertEquals("bottom", top.get(2).position());
+            assertEquals(List.of(4), strokeNumbers(top.get(2)));
+        }
+
+        @Test
+        void threePiecesGetMiddlePosition() {
+            // 川 in 州 is split into three around the dots
+            List<String> positions = repo.get("州").orElseThrow().components().stream()
+                    .filter(c -> "川".equals(c.element())).map(ReferenceComponent::position).toList();
+            assertEquals(List.of("left", "middle", "right"), positions);
+        }
+
+        @Test
+        void interlockingPiecesKeepPartNumbers() {
+            // 千 in 乗: piece 1 at the top level, piece 2 nested inside 木
+            ReferenceComponent first = component("乗", 0);
+            assertEquals("千", first.element());
+            assertEquals(Integer.valueOf(1), first.part());
+            assertEquals(List.of(1, 2), strokeNumbers(first));
+
+            ReferenceComponent tree = component("乗", 2);
+            assertEquals("木", tree.element());
+            ReferenceComponent second = tree.children().get(1);
+            assertEquals("千", second.element());
+            assertEquals(Integer.valueOf(2), second.part());
+            assertEquals(List.of(7), strokeNumbers(second));
+        }
+
+        @Test
+        void looseStrokesGetUnnamedComponent() {
+            List<ReferenceComponent> top = repo.get("万").orElseThrow().components();
+            assertEquals(2, top.size());
+            assertEquals("一", top.get(0).element());
+            assertNull(top.get(1).element());
+            assertEquals(List.of(2, 3), strokeNumbers(top.get(1)));
+        }
+
+        @Test
+        void sameElementTwiceIsNotMerged() {
+            // 圭 is 土 above 土: two whole components, not one split component
+            ReferenceComponent kei = component("街", 1); // [行 left, 圭, 行 right]
+            assertEquals("圭", kei.element());
+            assertEquals(List.of("top", "bottom"), kei.children().stream().map(ReferenceComponent::position).toList());
+            assertEquals(List.of(4, 5, 6), strokeNumbers(kei.children().get(0)));
+            assertEquals(List.of(7, 8, 9), strokeNumbers(kei.children().get(1)));
+        }
+
+        @Test
+        void differentRadicalClassifications() {
+            // 問: 門 is the Nelson radical, 口 the traditional one
+            List<ReferenceComponent> top = repo.get("問").orElseThrow().components();
+            assertEquals("nelson", top.get(0).radical());
+            assertEquals("tradit", top.get(1).radical());
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"一", "あ", "A"})
+        void undividedCharacterIsItsOwnComponent(String ch) {
+            ReferenceKanji ref = repo.get(ch).orElseThrow();
+            assertEquals(1, ref.components().size());
+            ReferenceComponent only = ref.components().get(0);
+            assertEquals(ch, only.element());
+            assertEquals(ref.strokes(), only.strokes());
+            assertTrue(only.children().isEmpty());
+        }
+
+        @Test
+        void componentStrokesAreTheCharactersStrokes() {
+            ReferenceKanji ref = repo.get("漢").orElseThrow();
+            assertTrue(ref.components().get(0).strokes().get(0) == ref.strokes().get(0));
+        }
+    }
+
     /** Every KanjiVG file shipped in resources must load and look sane. */
     @Test
     void everyBundledFileLoads() throws Exception {
@@ -190,6 +365,10 @@ class ReferenceRepositoryTest {
                     } else if (ref.get().strokes().size() != expectedStrokes) {
                         failures.add(name + ": " + ref.get().strokes().size() + " strokes, expected " + expectedStrokes);
                     } else {
+                        checkComponents(name, "top level", ref.get().strokes(), ref.get().components(), failures);
+                        if (ref.get().components().isEmpty()) {
+                            failures.add(name + ": no components");
+                        }
                         for (ReferenceStroke s : ref.get().strokes()) {
                             if (s.polyline().size() < 2) {
                                 failures.add(name + " stroke " + s.index() + ": fewer than 2 points");
@@ -212,6 +391,43 @@ class ReferenceRepositoryTest {
         assertTrue(checked > 6000, "only " + checked + " files found");
         assertTrue(failures.isEmpty(), failures.size() + " failures, e.g. "
                 + failures.subList(0, Math.min(20, failures.size())));
+    }
+
+    /**
+     * Components must cover their parent's strokes exactly once, reuse the character's stroke
+     * objects, list strokes in order, and have bounds that contain every stroke point.
+     */
+    private static void checkComponents(String file, String where, List<ReferenceStroke> parent,
+                                        List<ReferenceComponent> components, List<String> failures) {
+        if (components.isEmpty()) {
+            return;
+        }
+        List<ReferenceStroke> union = new ArrayList<>();
+        components.forEach(c -> union.addAll(c.strokes()));
+        union.sort(Comparator.comparingInt(ReferenceStroke::index));
+        if (!union.equals(parent)) {
+            failures.add(file + " " + where + ": components do not cover the strokes exactly once");
+        }
+        for (ReferenceComponent c : components) {
+            String label = c.element() == null ? "(unnamed)" : c.element();
+            for (int i = 0; i < c.strokes().size(); i++) {
+                ReferenceStroke s = c.strokes().get(i);
+                if (i > 0 && s.index() <= c.strokes().get(i - 1).index()) {
+                    failures.add(file + " " + label + ": strokes not in order");
+                }
+                if (parent.stream().noneMatch(p -> p == s)) {
+                    failures.add(file + " " + label + ": stroke " + s.index() + " is not the parent's object");
+                }
+                for (Point p : s.polyline()) {
+                    Bounds b = c.bounds();
+                    if (p.x() < b.minX() || p.x() > b.maxX() || p.y() < b.minY() || p.y() > b.maxY()) {
+                        failures.add(file + " " + label + ": bounds miss " + p);
+                        break;
+                    }
+                }
+            }
+            checkComponents(file, label, c.strokes(), c.children(), failures);
+        }
     }
 
     /** Allowed coordinate range: KanjiVG's 109x109 box. */

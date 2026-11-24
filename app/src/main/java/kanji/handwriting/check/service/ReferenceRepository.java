@@ -1,14 +1,21 @@
 package kanji.handwriting.check.service;
 
+import kanji.handwriting.check.model.Bounds;
 import kanji.handwriting.check.model.Point;
+import kanji.handwriting.check.model.ReferenceComponent;
 import kanji.handwriting.check.model.ReferenceKanji;
 import kanji.handwriting.check.model.ReferenceStroke;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -93,8 +100,8 @@ import org.xml.sax.SAXException;
  *       other parts) with attributes such as {@code kvg:element} (the component's character),
  *       {@code kvg:position} (left/right/top/bottom/…), {@code kvg:radical}, {@code kvg:phon}
  *       (phonetic component), {@code kvg:part}/{@code kvg:partial} (a component split around
- *       another), and {@code kvg:variant}/{@code kvg:original}. <b>Currently ignored.</b> Only the
- *       flat, ordered stroke list is extracted.
+ *       another), and {@code kvg:variant}/{@code kvg:original}. These become
+ *       {@link ReferenceKanji#components()}; see section 7.
  *   <li><b>{@code StrokeNumbers} group</b>: {@code <text>} labels showing where to print each
  *       stroke's number in a diagram. <b>Ignored.</b>
  *   <li>The {@code style} on the outer group (3-unit-wide black lines with round caps and joins)
@@ -211,22 +218,152 @@ import org.xml.sax.SAXException;
  *   <li><b>No network access.</b> KanjiVG files reference an external DTD URL. The parser uses
  *       the inline DTD (which declares the {@code kvg:*} attributes) and never fetches the
  *       external one.
- *   <li><b>Returned values are immutable.</b> {@link ReferenceKanji} and {@link ReferenceStroke} are
- *       records holding unmodifiable lists, so they compare by value and can be cached or shared.
+ *   <li><b>Returned values are immutable.</b> {@link ReferenceKanji}, {@link ReferenceComponent} and
+ *       {@link ReferenceStroke} are records holding unmodifiable lists, so they compare by value and
+ *       can be cached or shared.
  * </ul>
+ *
+ * <h2>7. Components (radicals and other parts)</h2>
+ *
+ * <p>KanjiVG nests the stroke paths inside {@code <g>} groups, one per component, for example 漢:
+ * <pre>{@code
+ * <g id="kvg:06f22" kvg:element="漢">                                  root: the whole character
+ *   <g kvg:element="氵" kvg:variant="true" kvg:original="水" kvg:position="left" kvg:radical="general">
+ *     <path id="kvg:06f22-s1"/> <path id="kvg:06f22-s2"/> <path id="kvg:06f22-s3"/>
+ *   </g>
+ *   <g kvg:position="right" kvg:phon="𦰩">                            unnamed group
+ *     <g kvg:element="艹" kvg:position="top"> ...strokes 4-6... </g>
+ *     <g kvg:position="bottom">
+ *       <g kvg:element="口"> ...strokes 7-9... </g>
+ *       <g kvg:element="夫"> <path s10/> <g kvg:element="大"> ...strokes 11-13... </g> </g>
+ *     </g>
+ *   </g>
+ * </g>
+ * }</pre>
+ * Each group becomes a {@link ReferenceComponent} with the same nesting. The root group (the whole
+ * character) is not itself returned. {@link ReferenceKanji#components()} lists its children.
+ *
+ * <p><b>Group attributes</b> (each may be absent):
+ * <table>
+ *   <caption>KanjiVG group attributes</caption>
+ *   <tr><th>Attribute</th><th>Field</th><th>Meaning</th></tr>
+ *   <tr><td>{@code kvg:element}</td><td>{@code element}</td><td>the component as a character,
+ *       in the form written (氵, not 水)</td></tr>
+ *   <tr><td>{@code kvg:variant}, {@code kvg:original}</td><td>{@code variant}, {@code original}</td>
+ *       <td>the element is a variant form; original is the standard form</td></tr>
+ *   <tr><td>{@code kvg:partial}</td><td>{@code partial}</td><td>only part of the element's usual
+ *       strokes are present</td></tr>
+ *   <tr><td>{@code kvg:part}</td><td>{@code part}</td><td>piece number of a split component (see
+ *       below)</td></tr>
+ *   <tr><td>{@code kvg:position}</td><td>{@code position}</td><td>placement relative to sibling
+ *       components (table below)</td></tr>
+ *   <tr><td>{@code kvg:radical}</td><td>{@code radical}</td><td>this component is the character's
+ *       radical under a classification: {@code general} (~5,800 groups), {@code tradit} (traditional
+ *       Kangxi, ~800), {@code nelson} (Nelson's dictionary, ~680), {@code jis} (3)</td></tr>
+ *   <tr><td>{@code kvg:phon}</td><td>{@code phon}</td><td>the phonetic element (the part that
+ *       hints at the reading) this component provides</td></tr>
+ * </table>
+ * {@code kvg:tradForm}, {@code kvg:radicalForm} and {@code kvg:number} occur fewer than 20 times
+ * and are not exposed.
+ *
+ * <p><b>Positions</b> ({@code kvg:position}), with approximate counts in the bundled data:
+ * <table>
+ *   <caption>Component positions</caption>
+ *   <tr><th>Value</th><th>Meaning</th><th>Example</th></tr>
+ *   <tr><td>{@code left} / {@code right}</td><td>side by side (~5,700 each)</td><td>亻 | 木 in 休</td></tr>
+ *   <tr><td>{@code top} / {@code bottom}</td><td>stacked (~6,500 each)</td><td>宀 over 子 in 字</td></tr>
+ *   <tr><td>{@code middle}</td><td>between a top and a bottom part (5)</td><td></td></tr>
+ *   <tr><td>{@code kamae}</td><td>encloses the rest, fully or partly (324)</td><td>門 in 問, 囗 in 國</td></tr>
+ *   <tr><td>{@code tare}</td><td>hangs over the top and left (419)</td><td>广 in 店</td></tr>
+ *   <tr><td>{@code nyo}</td><td>wraps the left and bottom (221); usually written <em>after</em>
+ *       what it wraps, so it is often the last component</td><td>⻌ (U+2EEC, a form of 辶) in 道</td></tr>
+ *   <tr><td>{@code kamaec}, {@code tarec}, {@code nyoc}</td><td>the part enclosed by a
+ *       {@code kamae}, {@code tare} or {@code nyo} (20, 400, 221)</td><td>首 in 道</td></tr>
+ *   <tr><td>{@code ⿵A}, {@code ⿵B}, {@code ⿶1}, {@code ⿶2}</td><td>rare enclosure layouts named
+ *       after Unicode ideographic description characters (22 in total)</td><td></td></tr>
+ * </table>
+ * Positions are only given where KanjiVG thinks they matter. Many components, such as 口 and 夫 in
+ * 漢, have none. For an exact location, use {@link ReferenceComponent#bounds()}, the box around the
+ * component's strokes in reference space.
+ *
+ * <p><b>Rules this class applies on top of the raw groups</b>, so that each component can be
+ * checked on its own:
+ * <ol>
+ *   <li><b>Split components are merged only when they enclose.</b> When a component is written in
+ *       pieces around another, KanjiVG stores each piece as a separate group with the same
+ *       {@code kvg:element} and {@code kvg:part="1"}, {@code "2"}, …. KanjiVG labels both
+ *       enclosures (囗 around 或 in 國) and side-by-side splits (行 around 圭 in 街) as
+ *       {@code kamae}, so the decision is made from geometry, for pieces that are siblings:
+ *       <ul>
+ *         <li><b>Separated</b>: the pieces' bounding boxes are all more than
+ *             {@value #SEPARATION_GAP} units (one stroke width) apart along the same axis. The
+ *             pieces stay separate components, each keeping its {@code part} number. Its
+ *             {@code position} is replaced by its place along that axis: {@code left},
+ *             {@code middle} or {@code right}, or {@code top}, {@code middle} or {@code bottom}.
+ *             Examples: 行 in 街, 衛 and 衝 (彳 left, 亍 right); 二 in 五 and 三 in 寒 (top,
+ *             bottom); 川 in 州 (left, middle, right). About 290 pieces.
+ *         <li><b>Otherwise</b> the pieces enclose or interlock with what lies between them. They are
+ *             merged into one component with {@code part == null}, whose strokes need not be
+ *             consecutive: 囗 in 國 is strokes 1, 2 and 11, and 匚 in 匠 is strokes 1 and 6.
+ *             Sub-components are merged the same way. About 890 components.
+ *       </ul>
+ *       The test is a heuristic. A few borderline cases, such as 匚 in 甚, come out separated.
+ *   <li><b>Interlocking pieces stay separate.</b> Some pieces sit at different depths because the
+ *       component interlocks with another. In 乗, 千's first piece (strokes 1–2) is a top-level
+ *       component, but its second piece (stroke 7) is inside 木. Merging them would make
+ *       components overlap, so each piece stays where it is and keeps its {@code part} number and
+ *       its {@code kvg:position}.
+ *   <li><b>Loose strokes are wrapped.</b> KanjiVG sometimes places strokes directly in a group
+ *       alongside sub-groups: 万 is 一 plus two strokes outside any sub-group, and 夫 is a stroke
+ *       plus 大. Each run of consecutive such strokes becomes an unnamed component with every
+ *       field {@code null} or {@code false} except {@code strokes} and {@code bounds}.
+ *   <li><b>Undivided characters get one component.</b> If the root has no sub-groups (一, kana,
+ *       Latin letters), {@code components()} holds a single component built from the root group,
+ *       so {@code element} is the character itself.
+ * </ol>
+ *
+ * <p><b>Guarantees</b>, checked for every bundled file by
+ * {@code ReferenceRepositoryTest.everyBundledFileLoads}:
+ * <ul>
+ *   <li>{@code components()} is non-empty, and its strokes together are exactly
+ *       {@code strokes()}, each once.
+ *   <li>The same holds one level down: a component's non-empty {@code children()} together hold
+ *       exactly its {@code strokes()}, each once. Repeating this at every level, the leaves cover
+ *       every stroke exactly once.
+ *   <li>Each component's {@code strokes()} are in stroke order and are the same objects as in
+ *       {@link ReferenceKanji#strokes()}, so {@code index()} gives the position in the whole
+ *       character's stroke order.
+ *   <li>Siblings are ordered by their first stroke.
+ *   <li>{@code bounds()} contains every point of the component's strokes.
+ * </ul>
+ * One element can appear more than once among siblings when the character really contains it
+ * twice: 圭 is 土 ({@code top}) above 土 ({@code bottom}). These are two components, not pieces of
+ * one.
  */
 public class ReferenceRepository {
     /** Points added per Bézier segment (sampled at t = 1/8, 2/8, …, 1). See class docs, section 5. */
     static final int CURVE_SEGMENTS = 8;
 
+    /**
+     * Minimum gap, in reference units, between the boxes of a split component's pieces for them to
+     * count as separate (side by side or stacked) rather than enclosing. Equals KanjiVG's stroke
+     * width, so strokes that touch when drawn never count as separated. See class docs, section 7.
+     */
+    static final double SEPARATION_GAP = 3;
+
     /** Stroke path ids look like "kvg:03042-s1"; group 1 is the 1-based stroke number. */
     private static final Pattern STROKE_ID = Pattern.compile("-s(\\d+)$");
+    /** The character's root group has id "kvg:<hex>" with no suffix, e.g. "kvg:06f22". */
+    private static final Pattern ROOT_GROUP_ID = Pattern.compile("kvg:[0-9a-f]+");
     /** One path-data token: a command letter or a number (signs, leading dots and exponents allowed). */
     private static final Pattern PATH_TOKEN =
             Pattern.compile("[A-Za-z]|[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?");
 
     /** Classpath folder holding KanjiVG files named like "03042.svg" (src/main/resources/kanjivg). */
     private static final String RESOURCE_DIR = "/kanjivg/";
+
+    /** Creates a repository reading the KanjiVG files bundled on the classpath. */
+    public ReferenceRepository() {}
 
     /**
      * Loads the KanjiVG reference for one character.
@@ -266,7 +403,9 @@ public class ReferenceRepository {
             if (in == null) {
                 return Optional.empty();
             }
-            return Optional.of(new ReferenceKanji(kanji, parseStrokes(newDocumentBuilder().parse(in))));
+            Document doc = newDocumentBuilder().parse(in);
+            List<ReferenceStroke> strokes = parseStrokes(doc);
+            return Optional.of(new ReferenceKanji(kanji, strokes, parseComponents(doc, strokes, file)));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read " + file, e);
         } catch (SAXException | ParserConfigurationException e) {
@@ -306,6 +445,212 @@ public class ReferenceRepository {
             strokes.add(new ReferenceStroke(i, flatten(raw.d()), raw.type()));
         }
         return List.copyOf(strokes);
+    }
+
+    /**
+     * A {@code <g>} element as read from the file, before split parts are merged. {@code element} is
+     * null for a synthetic group wrapping loose strokes.
+     */
+    private static final class RawGroup {
+        final Element element;
+        final List<Integer> strokeNumbers = new ArrayList<>(); // all descendants, 1-based
+        final List<RawGroup> children = new ArrayList<>();
+        boolean merged; // absorbed the other pieces of an enclosing split component
+        String splitPosition; // derived position of a non-enclosing split piece, overriding kvg:position
+
+        RawGroup(Element element) {
+            this.element = element;
+        }
+
+        String attr(String name) {
+            String value = element == null ? "" : element.getAttribute(name);
+            return value.isEmpty() ? null : value;
+        }
+
+        int firstStroke() {
+            return strokeNumbers.isEmpty() ? Integer.MAX_VALUE : Collections.min(strokeNumbers);
+        }
+    }
+
+    /** Builds the component tree from the character's root group (section 7 of the class docs). */
+    private static List<ReferenceComponent> parseComponents(Document doc, List<ReferenceStroke> strokes, String file) {
+        Element root = null;
+        NodeList groups = doc.getElementsByTagName("g");
+        for (int i = 0; i < groups.getLength() && root == null; i++) {
+            Element g = (Element) groups.item(i);
+            if (ROOT_GROUP_ID.matcher(g.getAttribute("id")).matches()) {
+                root = g;
+            }
+        }
+        if (root == null) {
+            throw new IllegalStateException("No character group (id=\"kvg:<hex>\") in " + file);
+        }
+        RawGroup rawRoot = readGroup(root);
+        List<RawGroup> top = childComponents(rawRoot, strokes);
+        if (top.isEmpty()) {
+            return List.of(toComponent(rawRoot, strokes));
+        }
+        return top.stream().map(g -> toComponent(g, strokes)).toList();
+    }
+
+    /**
+     * The group's sub-components: split parts handled, plus one synthetic unnamed group per run of
+     * consecutive strokes that sit directly in the group alongside sub-groups, so that the result
+     * covers every stroke of {@code parent} exactly once. Empty if the group has no sub-groups.
+     */
+    private static List<RawGroup> childComponents(RawGroup parent, List<ReferenceStroke> strokes) {
+        List<RawGroup> children = mergeSplitParts(parent.children, strokes);
+        if (children.isEmpty()) {
+            return children;
+        }
+        Set<Integer> covered = new HashSet<>();
+        children.forEach(c -> covered.addAll(c.strokeNumbers));
+        List<Integer> loose = parent.strokeNumbers.stream().filter(n -> !covered.contains(n)).sorted().toList();
+        RawGroup run = null;
+        for (int n : loose) {
+            if (run == null || run.strokeNumbers.get(run.strokeNumbers.size() - 1) != n - 1) {
+                run = new RawGroup(null);
+                children.add(run);
+            }
+            run.strokeNumbers.add(n);
+        }
+        children.sort(Comparator.comparingInt(RawGroup::firstStroke));
+        return children;
+    }
+
+    private static RawGroup readGroup(Element g) {
+        RawGroup raw = new RawGroup(g);
+        NodeList children = g.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            if (!(children.item(i) instanceof Element child)) {
+                continue;
+            }
+            if (child.getTagName().equals("g")) {
+                RawGroup sub = readGroup(child);
+                raw.children.add(sub);
+                raw.strokeNumbers.addAll(sub.strokeNumbers);
+            } else if (child.getTagName().equals("path")) {
+                Matcher m = STROKE_ID.matcher(child.getAttribute("id"));
+                if (m.find()) {
+                    raw.strokeNumbers.add(Integer.parseInt(m.group(1)));
+                }
+            }
+        }
+        return raw;
+    }
+
+    /**
+     * Handles siblings that are pieces of one split component (same {@code kvg:element}, each with a
+     * {@code kvg:part}), then orders the result by first stroke. If the pieces enclose something
+     * (they are not separated along an axis, as 囗 in 國), they are merged into the first piece.
+     * Otherwise they sit side by side or stacked (行 around 圭 in 街) and stay separate, each given
+     * a position derived from the geometry. Only siblings are considered; pieces at different
+     * nesting depths stay separate.
+     */
+    private static List<RawGroup> mergeSplitParts(List<RawGroup> siblings, List<ReferenceStroke> strokes) {
+        List<RawGroup> result = new ArrayList<>();
+        Map<String, List<RawGroup>> pieceSets = new LinkedHashMap<>();
+        for (RawGroup g : siblings) {
+            if (g.strokeNumbers.isEmpty()) {
+                continue;
+            }
+            String element = g.attr("kvg:element");
+            if (g.attr("kvg:part") != null && element != null) {
+                pieceSets.computeIfAbsent(element, k -> new ArrayList<>()).add(g);
+            } else {
+                result.add(g);
+            }
+        }
+        for (List<RawGroup> pieces : pieceSets.values()) {
+            if (pieces.size() == 1) {
+                result.add(pieces.get(0)); // other pieces are elsewhere in the tree (interlocking)
+            } else if (encloses(pieces, strokes)) {
+                RawGroup target = pieces.get(0);
+                for (RawGroup other : pieces.subList(1, pieces.size())) {
+                    target.strokeNumbers.addAll(other.strokeNumbers);
+                    target.children.addAll(other.children);
+                }
+                target.merged = true;
+                result.add(target);
+            } else {
+                assignSplitPositions(pieces, strokes);
+                result.addAll(pieces);
+            }
+        }
+        result.sort(Comparator.comparingInt(RawGroup::firstStroke));
+        return result;
+    }
+
+    private static Bounds bounds(RawGroup g, List<ReferenceStroke> strokes) {
+        return Bounds.of(g.strokeNumbers.stream()
+                .flatMap(n -> strokes.get(n - 1).polyline().stream()).toList());
+    }
+
+    /**
+     * True unless the pieces are fully separated along one axis (every pair of bounding boxes
+     * disjoint in x, or every pair disjoint in y). Separated pieces sit side by side or stacked
+     * (行 in 街, 二 in 五); anything else encloses or interlocks with its neighbour (囗 in 國,
+     * 匚 in 匠, 弋 in 國) and is kept whole.
+     */
+    private static boolean encloses(List<RawGroup> pieces, List<ReferenceStroke> strokes) {
+        return separatedAxis(pieces.stream().map(p -> bounds(p, strokes)).toList()) == null;
+    }
+
+    /**
+     * "x" or "y" if every pair of boxes is separated along that axis by more than
+     * {@link #SEPARATION_GAP} (x preferred), else null.
+     */
+    private static String separatedAxis(List<Bounds> boxes) {
+        boolean x = true, y = true;
+        for (int i = 0; i < boxes.size(); i++) {
+            for (int j = i + 1; j < boxes.size(); j++) {
+                Bounds a = boxes.get(i), b = boxes.get(j);
+                x &= a.maxX() + SEPARATION_GAP < b.minX() || b.maxX() + SEPARATION_GAP < a.minX();
+                y &= a.maxY() + SEPARATION_GAP < b.minY() || b.maxY() + SEPARATION_GAP < a.minY();
+            }
+        }
+        return x ? "x" : y ? "y" : null;
+    }
+
+    /**
+     * Gives each piece of a separated split component a position along the separating axis:
+     * {@code left}/{@code right} or {@code top}/{@code bottom}, with {@code middle} for any between.
+     */
+    private static void assignSplitPositions(List<RawGroup> pieces, List<ReferenceStroke> strokes) {
+        List<Bounds> boxes = pieces.stream().map(p -> bounds(p, strokes)).toList();
+        boolean horizontal = "x".equals(separatedAxis(boxes));
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < pieces.size(); i++) {
+            order.add(i);
+        }
+        order.sort(Comparator.comparingDouble(i -> horizontal ? boxes.get(i).center().x() : boxes.get(i).center().y()));
+        for (int rank = 0; rank < order.size(); rank++) {
+            String pos = rank == 0 ? (horizontal ? "left" : "top")
+                    : rank == order.size() - 1 ? (horizontal ? "right" : "bottom")
+                    : "middle";
+            pieces.get(order.get(rank)).splitPosition = pos;
+        }
+    }
+
+    private static ReferenceComponent toComponent(RawGroup g, List<ReferenceStroke> strokes) {
+        List<ReferenceStroke> own = g.strokeNumbers.stream().sorted().distinct()
+                .map(n -> strokes.get(n - 1)).toList();
+        Bounds bounds = Bounds.of(own.stream().flatMap(s -> s.polyline().stream()).toList());
+        List<ReferenceComponent> children = childComponents(g, strokes).stream()
+                .map(c -> toComponent(c, strokes)).toList();
+        String part = g.merged ? null : g.attr("kvg:part");
+        return new ReferenceComponent(
+                g.attr("kvg:element"),
+                g.attr("kvg:original"),
+                "true".equals(g.attr("kvg:variant")),
+                "true".equals(g.attr("kvg:partial")),
+                part == null ? null : Integer.parseInt(part),
+                g.splitPosition != null ? g.splitPosition : g.attr("kvg:position"),
+                g.attr("kvg:radical"),
+                g.attr("kvg:phon"),
+                own,
+                bounds,
+                children);
     }
 
     /**
