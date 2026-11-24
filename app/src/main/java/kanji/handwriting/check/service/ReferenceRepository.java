@@ -61,7 +61,11 @@ import org.xml.sax.SAXException;
  * Stroke counts range from 1 to 30 (驫 and 鸞 have 30).
  *
  * <p>KanjiVG also publishes variant files such as {@code 04e00-Kaisho.svg} (alternative
- * calligraphic forms). These are not bundled and this class never looks for them.
+ * calligraphic forms). Those are not bundled. This project adds its own variant files, named the
+ * same way ({@code <hex>-<Name>.svg}) and listed in {@code kanjivg/variants.txt}: alternative forms
+ * that are equally correct in handwriting, such as {@code 0304a-Straight.svg} (お with a straight
+ * first stroke and dot). {@link #get} never returns them; use {@link #variants} and
+ * {@link #getVariant}.
  *
  * <h2>2. File format (what this class reads, and what it ignores)</h2>
  *
@@ -353,8 +357,14 @@ public class ReferenceRepository {
 
     /** Stroke path ids look like "kvg:03042-s1"; group 1 is the 1-based stroke number. */
     private static final Pattern STROKE_ID = Pattern.compile("-s(\\d+)$");
-    /** The character's root group has id "kvg:<hex>" with no suffix, e.g. "kvg:06f22". */
-    private static final Pattern ROOT_GROUP_ID = Pattern.compile("kvg:[0-9a-f]+");
+    /**
+     * The character's root group has id "kvg:" plus the file name without ".svg": "kvg:06f22" in
+     * 06f22.svg, "kvg:04e00-Kaisho" in the variant file 04e00-Kaisho.svg.
+     */
+    private static String rootGroupId(String file) {
+        String name = file.substring(file.lastIndexOf('/') + 1);
+        return "kvg:" + name.substring(0, name.length() - ".svg".length());
+    }
     /** One path-data token: a command letter or a number (signs, leading dots and exponents allowed). */
     private static final Pattern PATH_TOKEN =
             Pattern.compile("[A-Za-z]|[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?");
@@ -398,7 +408,104 @@ public class ReferenceRepository {
         if (kanji == null || kanji.codePointCount(0, kanji.length()) != 1) {
             return Optional.empty();
         }
-        String file = RESOURCE_DIR + String.format(Locale.ROOT, "%05x.svg", kanji.codePointAt(0));
+        return load(kanji, RESOURCE_DIR + fileStem(kanji) + ".svg");
+    }
+
+    /**
+     * Names of the bundled variant forms of a character: the {@code <Name>} of every file
+     * {@code <hex>-<Name>.svg} next to its standard file, e.g. {@code "Kaisho"} for
+     * {@code 04e00-Kaisho.svg}, or {@code "Straight"} for this project's {@code 0304a-Straight.svg}
+     * (お with a straight first stroke and dot). A variant is an alternative but equally
+     * acceptable way of writing the character.
+     *
+     * @param kanji a single character
+     * @return variant names in alphabetical order; empty if there are none or {@code kanji} is not one
+     *     code point
+     * @throws UncheckedIOException if the resource folder cannot be listed
+     */
+    public List<String> variants(String kanji) {
+        if (kanji == null || kanji.codePointCount(0, kanji.length()) != 1) {
+            return List.of();
+        }
+        return variantIndex().getOrDefault(fileStem(kanji), List.of());
+    }
+
+    /**
+     * Loads one bundled variant form of a character, with the same guarantees as {@link #get}.
+     *
+     * @param kanji a single character
+     * @param variant a name from {@link #variants}
+     * @return the variant reference; empty if there is no such variant
+     * @throws UncheckedIOException if the file exists but cannot be read
+     * @throws IllegalStateException if the file is not well-formed XML
+     */
+    public Optional<ReferenceKanji> getVariant(String kanji, String variant) {
+        if (variant == null || !variants(kanji).contains(variant)) {
+            return Optional.empty();
+        }
+        return load(kanji, RESOURCE_DIR + fileStem(kanji) + "-" + variant + ".svg");
+    }
+
+    /** Variant file names: the code point in hex, a dash, then the variant name, e.g. "04e00-Kaisho.svg". */
+    private static final Pattern VARIANT_FILE = Pattern.compile("([0-9a-f]{5,})-([^./\\\\]+)\\.svg");
+
+    /** Variant names by file stem, built once from the resource folder listing (the data never changes). */
+    private static volatile Map<String, List<String>> variantIndex;
+
+    private static Map<String, List<String>> variantIndex() {
+        Map<String, List<String>> index = variantIndex;
+        if (index == null) {
+            index = scanVariants();
+            variantIndex = index;
+        }
+        return index;
+    }
+
+    /** Lists the resource folder, whether it is a directory or inside a jar. */
+    private static Map<String, List<String>> scanVariants() {
+        java.net.URL url = ReferenceRepository.class.getResource(RESOURCE_DIR);
+        if (url == null) {
+            return Map.of();
+        }
+        try {
+            java.net.URI uri = url.toURI();
+            if ("jar".equals(uri.getScheme())) {
+                java.nio.file.FileSystem fs;
+                try {
+                    fs = java.nio.file.FileSystems.newFileSystem(uri, Map.of());
+                } catch (java.nio.file.FileSystemAlreadyExistsException e) {
+                    fs = java.nio.file.FileSystems.getFileSystem(uri);
+                }
+                return scanVariants(fs.getPath(RESOURCE_DIR));
+            }
+            return scanVariants(java.nio.file.Path.of(uri));
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalStateException("Bad resource URL " + url, e);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to list " + RESOURCE_DIR, e);
+        }
+    }
+
+    private static Map<String, List<String>> scanVariants(java.nio.file.Path dir) throws IOException {
+        Map<String, List<String>> index = new java.util.TreeMap<>();
+        try (java.util.stream.Stream<java.nio.file.Path> files = java.nio.file.Files.list(dir)) {
+            for (java.nio.file.Path f : (Iterable<java.nio.file.Path>) files::iterator) {
+                Matcher m = VARIANT_FILE.matcher(f.getFileName().toString());
+                if (m.matches()) {
+                    index.computeIfAbsent(m.group(1), k -> new ArrayList<>()).add(m.group(2));
+                }
+            }
+        }
+        index.replaceAll((k, v) -> v.stream().sorted().toList());
+        return Collections.unmodifiableMap(index);
+    }
+
+    /** The code point in lowercase hex, zero-padded to 5 digits: the file name without extension. */
+    private static String fileStem(String kanji) {
+        return String.format(Locale.ROOT, "%05x", kanji.codePointAt(0));
+    }
+
+    private static Optional<ReferenceKanji> load(String kanji, String file) {
         try (InputStream in = ReferenceRepository.class.getResourceAsStream(file)) {
             if (in == null) {
                 return Optional.empty();
@@ -478,12 +585,12 @@ public class ReferenceRepository {
         NodeList groups = doc.getElementsByTagName("g");
         for (int i = 0; i < groups.getLength() && root == null; i++) {
             Element g = (Element) groups.item(i);
-            if (ROOT_GROUP_ID.matcher(g.getAttribute("id")).matches()) {
+            if (g.getAttribute("id").equals(rootGroupId(file))) {
                 root = g;
             }
         }
         if (root == null) {
-            throw new IllegalStateException("No character group (id=\"kvg:<hex>\") in " + file);
+            throw new IllegalStateException("No character group (id=\"" + rootGroupId(file) + "\") in " + file);
         }
         RawGroup rawRoot = readGroup(root);
         List<RawGroup> top = childComponents(rawRoot, strokes);

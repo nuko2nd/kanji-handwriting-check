@@ -20,6 +20,27 @@ Development of this program will follow the V-Model of the Software Development 
 | **Integration and Testing** | November 27 | Completion of integration testing and system validation |
 | **Submission** | November 27 | **Deadline for submission** |
 
+## Usage
+
+Check a drawing (a PNG of one kanji drawn on a square canvas, dark ink on white):
+
+```
+./gradlew run --args="drawing.png 語"
+```
+
+This prints pass/fail, the score, the alignment, and each component's score (worst first) with per-stroke coverage. It also saves an overlay image next to the drawing (`drawing-check.png`), or to a path given as a third argument. In the overlay, the reference is grey, the drawing is tinted from red (bad) to green (good) by component, missing parts are red dashes, and extra ink is orange.
+
+Each part of the character, and then each stroke, is snapped onto the nearest matching ink. Small slips cost nothing, and the score drops the further a part or stroke had to move, turn, or stretch to fit. The overall size of the drawing is not scored. Thin lines in the overlay show where each stroke was snapped to.
+
+Add options after the kanji:
+- `--lang ja` gives the results and the overlay in Japanese.
+- `--scoring distance` compares the drawing with the reference in place, without snapping. This is stricter.
+- `--tolerance 8 --falloff 2 --min-coverage 0.8` and similar make the checker more lenient or stricter.
+
+Run with no arguments to list all options.
+
+The checker compares shapes only: it does not check stroke order or direction, and hooks and stops (はね/とめ) are not judged. All settings are in `CheckerConfig`. On Windows, run `chcp 65001` first so kanji print correctly.
+
 ## Credits
 
 ### KanjiVG
@@ -60,6 +81,27 @@ This program's source code is licensed under the [MIT License](LICENSE). The Kan
 | | 11月25日 | フロントエンド及び単体テストの完了 |
 | **結合・テスト** | 11月27日 | 結合テスト及びシステム検証の完了 |
 | **提出** | 11月27日 | **提出締め切り** |
+
+## 使い方
+
+手書き画像（正方形のキャンバスに白地・濃い色で一字を書いた PNG）を判定する：
+
+```
+./gradlew run --args="drawing.png 語"
+```
+
+合否、得点、位置合わせの結果、及び各部品の得点（低い順）と画ごとの被覆率が表示される。あわせて、判定結果を重ねた画像が手書き画像と同じ場所に保存される（`drawing-check.png`。三つ目の引数で保存先を指定することもできる）。重ね合わせ画像では、手本が灰色、手書きの線が部品ごとに赤（悪い）から緑（良い）の色、足りない部分が赤の破線、余分な線が橙色で示される。
+
+文字の各部品、続いて各画を、最も近い手書きの線に合わせてから採点する。小さなずれは減点されず、部品や画を大きく動かす・傾ける・伸び縮みさせる必要があるほど得点が下がる。文字全体の大きさは採点に含まれない。重ね合わせ画像の細線は、各画を合わせた位置を示す。
+
+漢字の後に次のオプションを付けられる：
+- `--lang ja`：結果と重ね合わせ画像を日本語で表示する。
+- `--scoring distance`：合わせ込みをせず、手本と同じ位置で比較する（より厳しい）。
+- `--tolerance 8 --falloff 2 --min-coverage 0.8` など：判定を緩く、または厳しくする。
+
+引数なしで実行するとオプションの一覧が表示される。
+
+本プログラムは字形のみを比較する。筆順や画の向きは判定せず、はね・とめも判定の対象外である。設定はすべて `CheckerConfig` にまとめてある。Windows では、漢字を正しく表示するため先に `chcp 65001` を実行すること。
 
 ## クレジット
 

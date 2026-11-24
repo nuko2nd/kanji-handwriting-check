@@ -41,3 +41,10 @@ tasks.named<Test>("test") {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()
 }
+
+tasks.named<JavaExec>("run") {
+    // Print kanji and stroke-type characters correctly (see README for console setup).
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
+    // The checker exits with 1 when a drawing fails; that is a result, not a build failure.
+    isIgnoreExitValue = true
+}

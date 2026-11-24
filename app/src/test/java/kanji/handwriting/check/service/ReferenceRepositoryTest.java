@@ -87,6 +87,26 @@ class ReferenceRepositoryTest {
             assertTrue(repo.get("").isEmpty()); // private-use character, never in KanjiVG
         }
 
+        @Test
+        void straightOIsABundledVariant() {
+            assertEquals(List.of("Straight"), repo.variants("お"));
+            ReferenceKanji v = repo.getVariant("お", "Straight").orElseThrow();
+            assertEquals("お", v.kanji());
+            assertEquals(3, v.strokes().size());
+            // Its first stroke and dot are straight lines; stroke 2 matches the standard form.
+            assertEquals(2, v.strokes().get(0).polyline().size());
+            assertEquals(2, v.strokes().get(2).polyline().size());
+            assertEquals(repo.get("お").orElseThrow().strokes().get(1).polyline(), v.strokes().get(1).polyline());
+        }
+
+        @Test
+        void unknownVariantsAreEmpty() {
+            assertTrue(repo.variants("あ").isEmpty());
+            assertTrue(repo.getVariant("あ", "Straight").isEmpty());
+            assertTrue(repo.getVariant("お", "Kaisho").isEmpty());
+            assertTrue(repo.variants(null).isEmpty());
+        }
+
         @ParameterizedTest
         @NullAndEmptySource
         @ValueSource(strings = {"ab", "あい"})
@@ -348,7 +368,8 @@ class ReferenceRepositoryTest {
     @Test
     void everyBundledFileLoads() throws Exception {
         Path dir = Path.of(ReferenceRepository.class.getResource("/kanjivg").toURI());
-        Pattern strokeId = Pattern.compile("id=\"kvg:[0-9a-f]+-s\\d+\"");
+        // Standard files: kvg:04e00-s1. Variant files: kvg:04e00-Kaisho-s1.
+        Pattern strokeId = Pattern.compile("id=\"kvg:[0-9a-f]+(?:-[A-Za-z0-9]+)?-s\\d+\"");
         ReferenceRepository repo = new ReferenceRepository();
         List<String> failures = new ArrayList<>();
         int checked = 0;
@@ -356,10 +377,16 @@ class ReferenceRepositoryTest {
         try (Stream<Path> files = Files.list(dir)) {
             for (Path file : (Iterable<Path>) files.sorted()::iterator) {
                 String name = file.getFileName().toString();
-                String ch = new String(Character.toChars(Integer.parseInt(name.replace(".svg", ""), 16)));
+                if (!name.endsWith(".svg")) {
+                    continue; // e.g. variants.txt
+                }
+                String stem = name.replace(".svg", "");
+                int dash = stem.indexOf('-');
+                String ch = new String(Character.toChars(Integer.parseInt(dash < 0 ? stem : stem.substring(0, dash), 16)));
+                String variant = dash < 0 ? null : stem.substring(dash + 1);
                 long expectedStrokes = strokeId.matcher(Files.readString(file)).results().count();
                 try {
-                    Optional<ReferenceKanji> ref = repo.get(ch);
+                    Optional<ReferenceKanji> ref = variant == null ? repo.get(ch) : repo.getVariant(ch, variant);
                     if (ref.isEmpty()) {
                         failures.add(name + ": not found");
                     } else if (ref.get().strokes().size() != expectedStrokes) {
